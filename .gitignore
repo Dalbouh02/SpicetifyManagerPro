@@ -10,8 +10,8 @@ windowstate.json
 __state/
 
 # Crash / log files
-SpicetifyManager_CRASH_*.log
-SpicetifyManager_*.log
+SpicetifyManagerPro_CRASH_*.log
+SpicetifyManagerPro_*.log
 
 # OS junk
 Thumbs.db
