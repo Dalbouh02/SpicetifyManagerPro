@@ -2864,7 +2864,7 @@ $Script:WorkerFunctionNames = @(
     'ConvertTo-SpotifyVersion', 'Get-SpotifyCatalogArch', 'Get-SpotifyVersionCatalog',
     'Get-SpotifyCatalogEntry', 'Get-SpotifyDownloadInfo', 'Test-SpotifyVersionOffered',
     'Get-SpotifyVersionAdvisories', 'Test-PathDenyAcl', 'Set-DenyWriteAcl',
-    'Get-SpotifyUpdateBlockState', 'Set-SpotifyUpdateBlock', 'Remove-SpotifyUpdateBlock',
+    'Get-SpotifyUpdateGuardScope', 'Get-SpotifyUpdateBlockState', 'Set-SpotifyUpdateBlock', 'Remove-SpotifyUpdateBlock',
     'Get-InstalledSpotifyFileVersion', 'Invoke-SpotifyInstallerDownload',
     'Invoke-SpotifyPayloadExtract', 'Invoke-SpotifyCurrentUninstall',
     'Stop-SpotifyUninstaller',
@@ -4242,32 +4242,76 @@ function Set-DenyWriteAcl {
     return $true
 }
 
+function Get-SpotifyUpdateGuardScope {
+
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'Config access is best-effort here: the block-state probe may run before the Spotify paths are resolved, in which case the guard falls back to the default per-user Spotify locations.')]
+    [CmdletBinding()]
+    param()
+
+    $localDir   = Join-Path $env:LOCALAPPDATA 'Spotify'
+    $roamingDir = Join-Path $env:APPDATA 'Spotify'
+    $installDir = ''
+    try {
+        if ($null -ne $Script:Config -and $Script:Config.SpotifyInstallDir) {
+            $installDir = "$($Script:Config.SpotifyInstallDir)"
+        } elseif ($null -ne $Script:Config -and $Script:Config.SpotifyExePath) {
+            $installDir = Split-Path -Parent "$($Script:Config.SpotifyExePath)"
+        }
+    } catch { }
+    if ([string]::IsNullOrWhiteSpace($installDir)) { $installDir = $roamingDir }
+
+    $dirs = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @($installDir, $localDir, $roamingDir)) {
+        $full = "$d"
+        try { $full = [System.IO.Path]::GetFullPath($d) } catch { }
+        while ($full.Length -gt 3 -and $full.EndsWith('\')) { $full = $full.Substring(0, $full.Length - 1) }
+        if ([string]::IsNullOrWhiteSpace($full)) { continue }
+        $dup = $false
+        foreach ($e in $dirs) { if ($e -ieq $full) { $dup = $true; break } }
+        if (-not $dup) { $dirs.Add($full) }
+    }
+
+    $resolvedInstall = if ($dirs.Count -gt 0) { $dirs[0] } else { $roamingDir }
+    return [PSCustomObject]@{
+        InstallDir = $resolvedInstall
+        LocalDir   = $localDir
+        RoamingDir = $roamingDir
+        Dirs       = $dirs
+    }
+}
+
 function Get-SpotifyUpdateBlockState {
 
     [CmdletBinding()]
     param()
 
-    $localSpotifyDir   = Join-Path $env:LOCALAPPDATA 'Spotify'
-    $roamingSpotifyDir = Join-Path $env:APPDATA 'Spotify'
-    $updateDir         = Join-Path $localSpotifyDir 'Update'
-    $roamingUpdateDir  = Join-Path $roamingSpotifyDir 'Update'
-
-    $denyLocal   = Test-PathDenyAcl -Path $updateDir
-    $denyRoaming = Test-PathDenyAcl -Path $roamingUpdateDir
+    $paths = Get-SpotifyUpdateGuardScope
 
     $guarded = @()
     $pending = @()
-    foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
-        $p = Join-Path $localSpotifyDir $name
-        if (Test-Path -LiteralPath $p) {
-            if (Test-PathDenyAcl -Path $p) { $guarded += $p } else { $pending += $p }
+    $seen    = @{}
+    foreach ($dir in @($paths.Dirs)) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
+            $f = Join-Path $dir $name
+            if (-not (Test-Path -LiteralPath $f)) { continue }
+            $key = $f.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            if (Test-PathDenyAcl -Path $f) { $guarded += $f } else { $pending += $f }
         }
     }
 
+    $denyLocal   = Test-PathDenyAcl -Path (Join-Path $paths.LocalDir 'Update')
+    $denyRoaming = Test-PathDenyAcl -Path (Join-Path $paths.RoamingDir 'Update')
+    $denyInstall = Test-PathDenyAcl -Path (Join-Path $paths.InstallDir 'Update')
+
     return [PSCustomObject]@{
-        Blocked                = ($denyLocal -or $denyRoaming -or $guarded.Count -gt 0)
+        Blocked                = ($denyLocal -or $denyRoaming -or $denyInstall -or $guarded.Count -gt 0)
         DenyOnUpdateDir        = $denyLocal
         DenyOnRoamingUpdateDir = $denyRoaming
+        DenyOnInstallUpdateDir = $denyInstall
+        InstallDir             = $paths.InstallDir
         GuardedFiles           = $guarded
         PendingUpdateFiles     = $pending
     }
@@ -4300,46 +4344,47 @@ function Set-SpotifyUpdateBlock {
         }
     }
 
-    $localSpotifyDir = Join-Path $env:LOCALAPPDATA 'Spotify'
-    $updateDir       = Join-Path $localSpotifyDir 'Update'
-    $roamingUpdate   = Join-Path (Join-Path $env:APPDATA 'Spotify') 'Update'
+    $paths = Get-SpotifyUpdateGuardScope
 
-    foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
-        $p = Join-Path $localSpotifyDir $name
-        if (Test-Path -LiteralPath $p) {
-            try {
-                if (Test-PathDenyAcl -Path $p) {
-                    $null = Set-DenyWriteAcl -Path $p -Remove -IsFile
+    foreach ($dir in @($paths.Dirs)) {
+        foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
+            $p = Join-Path $dir $name
+            if (Test-Path -LiteralPath $p) {
+                try {
+                    if (Test-PathDenyAcl -Path $p) {
+                        $null = Set-DenyWriteAcl -Path $p -Remove -IsFile
+                    }
+                    Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+                    Write-Log -Message "Discarded pending update file: $p" -Level INFO
+                } catch {
+                    Write-Step -Message "  Could not discard pending update file $p -- it may still apply on the next launch: $($_.Exception.Message)" -Type WARN
                 }
-                Remove-Item -LiteralPath $p -Force -ErrorAction Stop
-                Write-Log -Message "Discarded pending update file: $p" -Level INFO
-            } catch {
-                Write-Step -Message "  Could not discard pending update file $p -- it may still apply on the next launch: $($_.Exception.Message)" -Type WARN
             }
         }
     }
 
-    if (-not (Test-Path -LiteralPath $updateDir)) {
-        New-Item -ItemType Directory -Force -Path $updateDir | Out-Null
-    }
-    $null = Set-DenyWriteAcl -Path $updateDir
-    Write-Log -Message "Deny ACL applied to $updateDir" -Level INFO
-
-    if (Test-Path -LiteralPath $roamingUpdate) {
-        $null = Set-DenyWriteAcl -Path $roamingUpdate
-        Write-Log -Message "Deny ACL applied to $roamingUpdate (present in roaming profile)" -Level INFO
+    foreach ($dir in @($paths.Dirs)) {
+        $updateDir = Join-Path $dir 'Update'
+        if (-not (Test-Path -LiteralPath $updateDir)) {
+            New-Item -ItemType Directory -Force -Path $updateDir | Out-Null
+        }
+        $null = Set-DenyWriteAcl -Path $updateDir
+        Write-Log -Message "Deny ACL applied to $updateDir" -Level INFO
     }
 
-    foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
-        $p = Join-Path $localSpotifyDir $name
-        if (-not (Test-Path -LiteralPath $p)) {
-            [System.IO.File]::WriteAllText($p, '')
-            $null = Set-DenyWriteAcl -Path $p -IsFile
-            Write-Log -Message "Guard file created: $p" -Level INFO
+    foreach ($dir in @($paths.Dirs)) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
+            $p = Join-Path $dir $name
+            if (-not (Test-Path -LiteralPath $p)) {
+                [System.IO.File]::WriteAllText($p, '')
+                $null = Set-DenyWriteAcl -Path $p -IsFile
+                Write-Log -Message "Guard file created: $p" -Level INFO
+            }
         }
     }
 
-    Write-Step -Message 'Spotify updates blocked (deny ACL on the update staging paths).' -Type OK
+    Write-Step -Message 'Spotify updates blocked (deny ACLs on the update staging paths in the install and local folders).' -Type OK
     Write-Log -Message 'The block is user-scope and reversible at any time (-UnblockUpdates / the GUI toggle). No admin rights are involved.' -Level INFO
     return (Get-SpotifyUpdateBlockState)
 }
@@ -4361,29 +4406,31 @@ function Remove-SpotifyUpdateBlock {
         return $state
     }
 
-    $localSpotifyDir = Join-Path $env:LOCALAPPDATA 'Spotify'
-    $roamingUpdate   = Join-Path (Join-Path $env:APPDATA 'Spotify') 'Update'
+    $paths = Get-SpotifyUpdateGuardScope
+
+    $unlockDirs = @()
+    if ($state.DenyOnUpdateDir)        { $unlockDirs += (Join-Path $paths.LocalDir 'Update') }
+    if ($state.DenyOnRoamingUpdateDir) { $unlockDirs += (Join-Path $paths.RoamingDir 'Update') }
+    if ($state.DenyOnInstallUpdateDir) { $unlockDirs += (Join-Path $paths.InstallDir 'Update') }
 
     $anyFailed = $false
-    if ($state.DenyOnUpdateDir) {
+    $handled   = @{}
+    foreach ($dir in $unlockDirs) {
+        $key = $dir.ToLowerInvariant()
+        if ($handled.ContainsKey($key)) { continue }
+        $handled[$key] = $true
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
         try {
-            $null = Set-DenyWriteAcl -Path (Join-Path $localSpotifyDir 'Update') -Remove
-            Write-Log -Message 'Deny rules removed from the Update folder.' -Level INFO
+            $null = Set-DenyWriteAcl -Path $dir -Remove
+            Write-Log -Message "Deny rules removed from $dir" -Level INFO
         } catch {
             $anyFailed = $true
-            Write-Step -Message "  Could not unlock the Update folder: $($_.Exception.Message)" -Type WARN
-        }
-    }
-    if ($state.DenyOnRoamingUpdateDir -and (Test-Path -LiteralPath $roamingUpdate)) {
-        try {
-            $null = Set-DenyWriteAcl -Path $roamingUpdate -Remove
-        } catch {
-            $anyFailed = $true
-            Write-Step -Message "  Could not unlock the roaming Update folder: $($_.Exception.Message)" -Type WARN
+            Write-Step -Message "  Could not unlock $dir : $($_.Exception.Message)" -Type WARN
         }
     }
 
     foreach ($guard in @($state.GuardedFiles)) {
+        if (-not (Test-Path -LiteralPath $guard)) { continue }
         try {
             $null = Set-DenyWriteAcl -Path $guard -Remove -IsFile
             Remove-Item -LiteralPath $guard -Force -ErrorAction Stop
@@ -4635,13 +4682,13 @@ function Invoke-SpotifyCurrentUninstall {
 
 function Invoke-SpotifyLeftoverCleanup {
 
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'The Stop-SpotifyUninstaller call is best-effort cleanup: it logs its own failures, and a throw here must not mask the leftover-removal outcome that is reported right below.')]
     [CmdletBinding()]
     param()
 
     $targets = @(
         $Script:Config.SpotifyInstallDir,
-        (Join-Path $env:LOCALAPPDATA 'Spotify'),
-        (Join-Path (Get-TempDir) 'SpotifyUninstall.exe')
+        (Join-Path $env:LOCALAPPDATA 'Spotify')
     )
     foreach ($p in $targets) {
         if (Test-Path -LiteralPath $p) {
@@ -4652,6 +4699,42 @@ function Invoke-SpotifyLeftoverCleanup {
                 Write-Log -Message "Leftover removal failed (continuing): $p -- $($_.Exception.Message)" -Level WARN
             }
         }
+    }
+
+    $uninstallerExe = Join-Path (Get-TempDir) 'SpotifyUninstall.exe'
+    if (-not (Test-Path -LiteralPath $uninstallerExe)) { return }
+
+    $lastErr = ''
+    $removed = $false
+    try {
+        Remove-Item -LiteralPath $uninstallerExe -Force -ErrorAction Stop
+        $removed = $true
+    } catch {
+        $lastErr = $_.Exception.Message
+    }
+
+    if (-not $removed) {
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if (-not (Get-Process -Name 'SpotifyUninstall' -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 250
+        }
+        try { Stop-SpotifyUninstaller } catch { }
+        for ($attempt = 0; $attempt -lt 5 -and -not $removed; $attempt++) {
+            try {
+                Remove-Item -LiteralPath $uninstallerExe -Force -ErrorAction Stop
+                $removed = $true
+            } catch {
+                $lastErr = $_.Exception.Message
+                Start-Sleep -Milliseconds 400
+            }
+        }
+    }
+
+    if ($removed) {
+        Write-Log -Message "Removed leftover: $uninstallerExe" -Level INFO
+    } else {
+        Write-Log -Message "Leftover removal failed (continuing): $uninstallerExe -- $lastErr (the uninstaller copy is still locked; it is harmless and can be deleted after the next reboot)" -Level WARN
     }
 }
 
@@ -7527,6 +7610,8 @@ function Invoke-Diagnostics {
         Write-Host ('  Update block:              ' + $(if ($diagBlock.Blocked) { 'ACTIVE (deny ACL)' } else { 'not active' }))
         Write-Host ('  Update dir deny ACL:       ' + $diagBlock.DenyOnUpdateDir)
         Write-Host ('  Roaming Update deny ACL:   ' + $diagBlock.DenyOnRoamingUpdateDir)
+        Write-Host ('  Install dir:               ' + $diagBlock.InstallDir)
+        Write-Host ('  Install Update deny ACL:   ' + $diagBlock.DenyOnInstallUpdateDir)
         Write-Host ('  Guard files:               ' + @($diagBlock.GuardedFiles).Count)
         if (@($diagBlock.PendingUpdateFiles).Count -gt 0) {
             Write-Host ('  PENDING staged update:     ' + @($diagBlock.PendingUpdateFiles).Count + ' file(s) -- will apply on next launch') -ForegroundColor Yellow
