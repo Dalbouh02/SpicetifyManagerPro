@@ -1,4 +1,4 @@
-# SpicetifyManager
+# SpicetifyManagerPro
 
 [![Release](https://img.shields.io/github/v/release/Dalbouh02/SpicetifyManager?style=flat&label=Release)](https://github.com/Dalbouh02/SpicetifyManager/releases)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-1DB954.svg)](LICENSE)
@@ -8,7 +8,7 @@
 [![Stars](https://img.shields.io/github/stars/Dalbouh02/SpicetifyManager?style=flat&label=Stars&color=1DB954)](https://github.com/Dalbouh02/SpicetifyManager/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/Dalbouh02/SpicetifyManager?style=flat&label=Last%20Update)](https://github.com/Dalbouh02/SpicetifyManager/commits/main)
 
-PowerShell tool for installing, repairing, backing up, and uninstalling Spicetify and Spotify on Windows. Single `.ps1` file, WPF GUI plus console mode.
+PowerShell tool for installing, repairing, and removing Spicetify and Spotify on Windows, with Spotify version management: downgrade, roll forward, pin a version, and block automatic updates. Single `.ps1` file, WPF GUI plus console mode. No installer, no admin rights.
 
 <img src="assets/main-window.png" alt="Main window" width="960">
 
@@ -16,115 +16,137 @@ PowerShell tool for installing, repairing, backing up, and uninstalling Spicetif
 
 - Windows 10 or 11
 - PowerShell 5.1 (preinstalled) or PowerShell 7+
-- Administrator privileges
 - Internet connection
 
 ## Quick start
 
-1. Download [`SpicetifyManager.ps1`](https://github.com/Dalbouh02/SpicetifyManager/releases/latest/download/SpicetifyManager.ps1) from the latest release.
-2. Right-click → **Run with PowerShell** → **Open** on the execution policy prompt.
-3. Click **Install**.
+1. Download [`SpicetifyManagerPro.ps1`](https://github.com/Dalbouh02/SpicetifyManagerPro/releases/latest/download/SpicetifyManagerPro.ps1) from the latest release.
+2. Right-click the file → **Run with PowerShell** → **Open** on the execution policy prompt.
+3. Click **Start**.
 
-## Switches if you dont want to use the GUI
+If your browser renames the download or PowerShell blocks it, unblock it once:
+
+```powershell
+Unblock-File .\SpicetifyManagerPro.ps1
+```
+
+## What it does
+
+**Start** runs the full workflow: preflight checks, install or verify Spotify (desktop, per-user), snapshot your customizations, install or update Spicetify, install the Marketplace, restore your customizations, apply the configuration. It downloads both Spotify and Spicetify if you have neither.
+
+**Repair Only** reinstalls Spotify, rebuilds the Spicetify backup, and re-applies your configuration. Your themes, extensions, and settings are snapshotted first and restored after.
+
+**Uninstall** removes Spicetify, restores stock Spotify, and keeps a backup of your customizations.
+
+**Version** opens the version manager. You can list available versions, switch to any of them (downgrade or roll forward), and pin a version so installs and repairs keep it instead of taking the latest. User data (login, cache, settings) is carried across a version switch.
+
+**Updates** toggles the update block. Blocking disables the update check inside the Spotify binary — the same method `spicetify spotify-updates block` uses. Spotify will not update itself while blocked. Blocking closes Spotify, discards any already-staged update, and is fully reversible. No admin rights and no ACL tricks.
+
+Note for users of v1.1.3 and earlier: the old update block created guard files that stop modern Spotify versions from launching. Run **Block** or **Unblock** once with this version — it removes the old files and switches to the binary method. Spotify will start normally again.
+
+The tool refuses to touch the Microsoft Store version of Spotify (it cannot be modified). Uninstall it from Windows Settings first; the tool then installs the desktop version.
+
+## Command line
 
 | Switch | Effect |
 |---|---|
-| `-NoUI` | Console mode, no WPF window. For CI or scheduled tasks. |
-| `-Repair` | Reinstall Spotify, recreate Spicetify backup, re-apply config. |
-| `-Uninstall` | Remove Spicetify and restore stock Spotify. |
+| `-NoUI` | Console mode, no GUI. For CI or scheduled tasks. |
+| `-Repair` | Repair as described above, then exit. |
+| `-Uninstall` | Uninstall as described above, then exit. |
 | `-Diagnose` | Print environment info and exit. No side effects. |
+| `-ListVersions` | List the Spotify version catalog and exit. |
+| `-DowngradeTo <ver>` | Switch to a version, e.g. `1.2.13.661`. `none` clears the pin, `latest` clears the pin and repairs to the newest version. |
+| `-AcceptVersionRisks` | Skip the confirmation for versions with known problems. |
+| `-BlockUpdates` | Block Spotify self-updates, then exit. |
+| `-UnblockUpdates` | Unblock Spotify self-updates, then exit. |
 | `-KeepLog` | Keep the run log on success (deleted by default). |
 | `-SkipPreflight` | Skip the pre-flight environment checks. |
 | `-LogPath <path>` | Override the default log location. |
-| `-CacheDir <path>` | Override the spicetify cache directory. `none` disables caching. |
-| `-MaxRetries <n>` | Network retry count. Default `3`. |
+| `-CacheDir <path>` | Spicetify download cache directory. `none` disables caching. |
+| `-MaxRetries <n>` | Network retry attempts. Default `3`. |
 | `-RetryDelayMs <n>` | Milliseconds between retries. Default `2000`. |
-| `-ProcessTimeoutMs <n>` | Per-process execution timeout in ms. Default `90000`. |
-| `-BackupRetention <n>` | Number of backup snapshots to keep. Default `3`. |
-| `-FromLauncher` | Internal flag. Suppresses the "Press any key" prompt. |
+| `-ProcessTimeoutMs <n>` | Per-process timeout in ms. Default `90000`. |
+| `-BackupRetention <n>` | Backup snapshots to keep. Default `3`. |
 
 ### Examples
 
 ```powershell
-# Full install with GUI (default)
-powershell -ExecutionPolicy Bypass -File .\SpicetifyManager.ps1
+# Full install / update (GUI)
+powershell -ExecutionPolicy Bypass -File .\SpicetifyManagerPro.ps1
 
-# Headless install (CI / scheduled task)
-powershell -ExecutionPolicy Bypass -File .\SpicetifyManager.ps1 -NoUI
+# Headless (CI, scheduled task)
+powershell -ExecutionPolicy Bypass -File .\SpicetifyManagerPro.ps1 -NoUI
 
-# Repair a broken install
-powershell -ExecutionPolicy Bypass -File .\SpicetifyManager.ps1 -Repair
+# Repair
+powershell -ExecutionPolicy Bypass -File .\SpicetifyManagerPro.ps1 -Repair
 
-# Uninstall Spicetify, restore stock Spotify
-powershell -ExecutionPolicy Bypass -File .\SpicetifyManager.ps1 -Uninstall
+# Downgrade to a specific version and pin it
+powershell -ExecutionPolicy Bypass -File .\SpicetifyManagerPro.ps1 -DowngradeTo 1.2.13.661
 
-# Print environment diagnostics
-powershell -ExecutionPolicy Bypass -File .\SpicetifyManager.ps1 -Diagnose
+# Block / unblock Spotify self-updates
+powershell -ExecutionPolicy Bypass -File .\SpicetifyManagerPro.ps1 -BlockUpdates
+powershell -ExecutionPolicy Bypass -File .\SpicetifyManagerPro.ps1 -UnblockUpdates
 ```
 
-## Features
-
-- Install, update, repair, uninstall Spicetify and Spotify (it will download both of them even if you dont have any.)
-- Detect and refuse the Microsoft Store version of Spotify.
-- Snapshot themes, extensions, config, and `spicetify/Custom` before destructive operations; keep the last N backups (default 3, configurable)
-- Preflight checks: disk space, network, architecture, Spotify Store-vs-desktop
-- Crash log to `%TEMP%\SpicetifyManager_CRASH_<timestamp>.log`, console held open for 10 seconds so the path can be copied
-- Console mode (`-NoUI`) for CI and scheduled tasks
-- State stored under `%APPDATA%\SpicetifyManager\` so it survives a Spicetify uninstall
-- Single file. No installer, no module manifest, no DLLs etc.
-
-## File layout
+## Files
 
 | Path | Purpose |
 |---|---|
-| `%APPDATA%\SpicetifyManager\config.json` | User preferences |
-| `%APPDATA%\SpicetifyManager\stats.json` | Install / uninstall counters |
-| `%APPDATA%\SpicetifyManager\windowstate.json` | GUI window position and size |
-| `%TEMP%\SpicetifyManager_<yyyyMMdd>.log` | Run log (deleted on success unless `-KeepLog`) |
-| `%TEMP%\SpicetifyManager_CRASH_<timestamp>.log` | Crash report. Never deleted. |
+| `%APPDATA%\SpicetifyManagerPro\config.json` | Settings |
+| `%APPDATA%\SpicetifyManagerPro\stats.json` | Counters |
+| `%APPDATA%\SpicetifyManagerPro\windowstate.json` | Window position and size |
+| `%APPDATA%\SpicetifyManagerPro\BackupHistory\` | Backup snapshots |
+| `%TEMP%\SpicetifyManagerPro_<yyyyMMdd>.log` | Run log (deleted on success unless `-KeepLog`) |
+| `%TEMP%\SpicetifyManagerPro_CRASH_<timestamp>.log` | Crash report. Never deleted automatically. |
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | Success |
-| `5` | Preflight failure |
-| `10` | Spotify install / detect failure |
-| `15` | Backup failure |
-| `20` | Spicetify install / update failure |
-| `25` | Marketplace install failure |
-| `30` | Restore failure |
-| `35` | Apply (config) failure |
-| `40` | Repair failure |
-| `45` | Uninstall failure |
-| `99` | General error |
-
-## Releases
-
-Grab the latest `SpicetifyManager.ps1` from [the releases page](https://github.com/Dalbouh02/SpicetifyManager/releases). Each release attaches the script as a downloadable asset.
+| `1` | Initialization failure |
+| `2` | Preflight failure |
+| `3` | Backup failure |
+| `4` | Spotify install or detection failure |
+| `5` | Spicetify install or update failure |
+| `6` | Marketplace install failure |
+| `7` | Apply (configuration) failure |
+| `8` | Uninstall failure |
+| `9` | Restore failure |
+| `10` | Cancelled by user |
+| `11` | Version switch failure |
+| `12` | Update block toggle failure |
+| `64` | PowerShell older than 5.1 |
+| `65` | Not running on Windows |
+| `66` | WPF assemblies failed to load |
+| `67` | GUI needs an interactive STA session |
+| `68` | Another instance is already running |
 
 ## FAQ
 
-**Is this safe?**
-The script writes to `%APPDATA%`, `%LOCALAPPDATA%\spicetify`, `%TEMP%`, and (when installing Spotify) `%LOCALAPPDATA%\Spotify`. Network calls go to `github.com` (Spicetify release metadata), `raw.githubusercontent.com` (Spicetify CLI download), `download.scdn.co` (Spotify installer), and `api.github.com` (Marketplace metadata). Run `-Diagnose` to inspect the environment probe.
+**Does it need administrator rights?**
+No. Everything installs per-user under `%APPDATA%` and `%LOCALAPPDATA%`.
 
-**Will it survive a Spotify update?**
-Yes — Spotify updates reset the modified files. Re-run the script and choose **Repair** to recreate the Spicetify backup and re-apply the config. Your customization's are preserved across the repair because they're snapshotted before re-apply but some extinctions may break because they get outdated after the updated i will add block updates button in the future this will keep everything forever and the user decide to unblock it and update when ever he want.
+**What does it change on my system?**
+Spotify (`%APPDATA%\Spotify`), Spicetify (`%APPDATA%\spicetify`, `%LOCALAPPDATA%\spicetify`), its own folder under `%APPDATA%\SpicetifyManagerPro`, and temp files under `%TEMP%`. When the update block is on, it also rewrites nine bytes inside the Spotify binary (the update-check endpoint) — this invalidates the file's digital signature, which is expected and does not stop Spotify from running.
 
-**Why is the console window hidden in GUI mode?**
-The WPF window is the interface. The backing PowerShell console is the host process. On any unhandled error the console is re-shown and held open for 10 seconds so the crash report can be read and the log path copied.
+**What does it connect to?**
+`api.github.com` and `github.com` (Spicetify and Marketplace releases), `download.scdn.co` (Spotify installer), and `raw.githubusercontent.com` plus `loadspot.amd64fox1.workers.dev` (the community Spotify version catalog by LoaderSpot). Run `-Diagnose` to see the full environment report.
 
-**The script says "Spotify Store version detected" — what now?**
-Spicetify cannot modify the Microsoft Store version of Spotify (UWP package, files locked). Open **Settings → Apps → Installed apps**, uninstall "Spotify" (the Store version), then run the script again. It will install the standard desktop version from `download.scdn.co` automatically you just need to delete the Microsoft Store version of Spotify.
+**Spotify updated and my theme broke. What now?**
+Run **Repair Only**. To keep a version fixed in place, pin it (**Version**) and block updates (**Updates**).
 
-**Where is my config / backup / log?**
-See the **File layout** table above.
+**A version switch failed and the tool talks about a rescue directory.**
+Version switches stage and restore your user data first. If anything fails mid-switch, the data is parked in `%APPDATA%\SpicetifyManagerPro\UserdataRescue_<timestamp>` and the log tells you where. Nothing is deleted while a rescue directory exists.
 
-## Acknowledgments
+**Why is the version list missing old versions?**
+Versions are filtered by what works: your CPU architecture, Windows 10+, login-broken builds (1.1.87.612 – 1.2.5.1006), and very old builds are excluded or flagged.
+
+## Credits
 
 - [Spicetify](https://github.com/spicetify/cli)
 - [Spicetify Marketplace](https://github.com/spicetify/marketplace)
-- [Spotify](https://www.spotify.com)
+- [LoaderSpot](https://github.com/LoaderSpot/table) — Spotify version catalog
 
 ## License
 
