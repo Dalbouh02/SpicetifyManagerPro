@@ -137,7 +137,7 @@ foreach ($asm in @('System.IO.Compression.FileSystem', 'System.Net.Http', 'Prese
     }
 }
 
-$Script:ScriptVersion   = '1.1.3'
+$Script:ScriptVersion   = '1.1.5'
 
 $Script:SingleInstanceMutex = $null
 $Script:LegacySingleInstanceMutex = $null
@@ -311,6 +311,16 @@ function Get-PhaseExitKey {
 
 $Script:SpotifyCatalogManifestUrl = 'https://raw.githubusercontent.com/LoaderSpot/table/main/table/versions.json'
 $Script:VersionCatalogCache       = $null
+
+# Modern Spotify (>= ~1.2.7x) no longer updates through the legacy <install>\Update staging
+# that the deny-ACL guards block. It checks for updates at an endpoint whose URL is baked
+# into the program files (desktop-update/v2/update on upgrade.scdn.co). The primary block
+# method is therefore an in-place, same-length byte patch of that URL inside Spotify.exe /
+# Spotify.dll -- the same approach the official spicetify CLI uses for
+# "spicetify spotify-updates block" (and SpotX/BlockTheSpot block the same endpoint).
+$Script:SpotifyUpdateEndpointNeedle  = 'desktop-update/v2/update'
+$Script:SpotifyUpdateEndpointPatched = 'desktop-update/no/thanks'
+$Script:EndpointScanCache            = @{}
 
 function Set-ContentAtomic {
 
@@ -1043,7 +1053,7 @@ $Script:MainWindowXaml = @'
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                         <TextBlock Text="SpicetifyManagerPro" FontSize="20" FontWeight="Bold"
                                    Foreground="#FF1DB954" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="TxtVersion" Text="v1.1.3" FontSize="11" Foreground="#FFB3B3B3"
+                        <TextBlock x:Name="TxtVersion" Text="v1.1.4" FontSize="11" Foreground="#FFB3B3B3"
                                    VerticalAlignment="Bottom" Margin="8,0,0,4"
                                    Cursor="Hand"
                                    ToolTip="Click for About dialog">
@@ -2275,11 +2285,11 @@ function Update-UpdateBlockChip {
         $state = Get-SpotifyUpdateBlockState
         if ([bool]$state.Blocked) {
             $btn.Content = 'Updates: BLOCKED'
-            $btn.ToolTip = 'Spotify self-updates are blocked (deny ACL on the staging paths). Click to unblock.'
+            $btn.ToolTip = 'Spotify self-updates are blocked (staging folder locked + update endpoint disabled). Click to unblock.'
             if ($null -ne $accentBrush) { $btn.Foreground = $accentBrush }
         } else {
             $btn.Content = 'Updates: allowed'
-            $btn.ToolTip = 'Spotify can self-update. Click to block updates (reversible, no admin rights).'
+            $btn.ToolTip = 'Spotify can self-update. Click to block updates (reversible, no admin rights; Spotify is closed briefly to patch the updater endpoint).'
             if ($null -ne $neutralBrush) { $btn.Foreground = $neutralBrush }
         }
         if (@($state.PendingUpdateFiles).Count -gt 0) {
@@ -2313,7 +2323,9 @@ function Invoke-UpdateBlockToggleUi {
         $body = @(
             'Unblock Spotify automatic updates?'
             ''
-            'This removes the deny rules from the update staging paths;'
+            'This restores the original update-check endpoint inside the Spotify'
+            'program, removes the update-blocking launch flag from your shortcuts'
+            'and unlocks the update staging folder;'
             'Spotify will update itself again on future launches.'
         ) -join "`n"
         if ([System.Windows.MessageBox]::Show($OwnerWindow, $body, 'Unblock Updates',
@@ -2340,9 +2352,15 @@ function Invoke-UpdateBlockToggleUi {
         $body = @(
             'Block Spotify automatic updates?'
             ''
-            '  - Denies write access to Spotify update staging paths'
+            '  - Locks the update staging folder (%LOCALAPPDATA%\Spotify\Update)'
+            '    -- the method spicetify''s own "spotify-updates block" uses'
+            '  - Adds Spotify''s documented --update-endpoint-override launch'
+            '    flag to the Spotify shortcuts and the autostart entry'
+            '  - Patches the update-check endpoint inside the Spotify program'
+            '    (skipped automatically when Smart App Control is on, and'
+            '    reverted automatically if it prevents Spotify from launching)'
+            '  - Spotify is closed briefly, then re-launched to verify it works'
             '  - Reversible at any time, no admin rights required'
-            '  - Spotify does not need to restart'
             '  - A pending staged update (if any) is discarded'
         ) -join "`n"
         if ([System.Windows.MessageBox]::Show($OwnerWindow, $body, 'Block Updates',
@@ -2846,6 +2864,7 @@ $Script:WorkerFunctionNames = @(
     'Invoke-ExternalCommand', 'Invoke-SpicetifyCli',
     'Copy-ItemSafe', 'Test-ZipIntegrity', 'Test-ZipEntryPaths', 'Wait-ForFileRelease',
     'Wait-ForSpotifyRelease', 'Get-FreeDiskSpaceMB', 'Set-IniValue', 'Set-ContentAtomic',
+    'Find-BytePattern', 'Get-SpotifyEndpointFileState',
     'Get-DownloadGlobalPercent', 'Invoke-DownloadWithProgress',
     'Get-GitHubLatestRelease', 'Resolve-SpicetifyConfigPaths', 'Get-TempDir',
     'Get-IniValue',
@@ -2864,7 +2883,11 @@ $Script:WorkerFunctionNames = @(
     'ConvertTo-SpotifyVersion', 'Get-SpotifyCatalogArch', 'Get-SpotifyVersionCatalog',
     'Get-SpotifyCatalogEntry', 'Get-SpotifyDownloadInfo', 'Test-SpotifyVersionOffered',
     'Get-SpotifyVersionAdvisories', 'Test-PathDenyAcl', 'Set-DenyWriteAcl',
+    'Get-SpotifyUpdateBlockFlag', 'Test-SmartAppControlEnabled',
+    'Get-SpotifyLauncherShortcutPaths', 'Set-SpotifyLauncherUpdateFlag',
+    'Get-SpotifyLauncherUpdateFlagState', 'Test-SpotifyLaunchHealth',
     'Get-SpotifyUpdateGuardScope', 'Get-SpotifyUpdateBlockState', 'Set-SpotifyUpdateBlock', 'Remove-SpotifyUpdateBlock',
+    'Set-SpotifyEndpointPatch',
     'Get-InstalledSpotifyFileVersion', 'Invoke-SpotifyInstallerDownload',
     'Invoke-SpotifyPayloadExtract', 'Invoke-SpotifyCurrentUninstall',
     'Stop-SpotifyUninstaller',
@@ -2872,6 +2895,8 @@ $Script:WorkerFunctionNames = @(
     'Invoke-SpotifyUserdataRestore', 'Invoke-SpotifyRegistryWrite',
     'Invoke-SpotifyVersionSwap', 'Get-PinnedSpotifyVersion', 'Save-Config',
     'Save-StagedUserdata', 'Get-HostOsMajor',
+    'Get-SpotifyBrowserProfileDir', 'Invoke-SpotifyBrowserProfileStage',
+    'Invoke-SpotifyBrowserProfileRestore', 'Save-StagedBrowserProfile',
 
     'Start-Phase', 'Complete-Phase', 'Invoke-Workflow',
 
@@ -2927,6 +2952,9 @@ $Script:WorkerActiveStepName = $null
 $Script:UpdateBlockReapplyFailed = $false
 $Script:VersionCatalogCache     = $VersionCatalogCache
 $Script:SpotifyCatalogManifestUrl = $SpotifyCatalogManifestUrl
+$Script:SpotifyUpdateEndpointNeedle  = $SpotifyUpdateEndpointNeedle
+$Script:SpotifyUpdateEndpointPatched = $SpotifyUpdateEndpointPatched
+$Script:EndpointScanCache = @{}
 $Script:ConfigPath     = $ConfigPath
 $Script:AppStateDir    = $AppStateDir
 $Script:KeepLog        = $KeepLog
@@ -2941,6 +2969,11 @@ try {
         $rescueFailed = $false
         try {
             $null = Save-StagedUserdata -StagingPath $Script:StagingPath
+        } catch {
+            $rescueFailed = $true
+        }
+        try {
+            $null = Save-StagedBrowserProfile -StagingPath $Script:StagingPath
         } catch {
             $rescueFailed = $true
         }
@@ -3002,6 +3035,8 @@ function New-WorkerRunspace {
         $rs.SessionStateProxy.SetVariable('AcceptVersionRisks', $riskVal)
         $rs.SessionStateProxy.SetVariable('VersionCatalogCache',       $Script:VersionCatalogCache)
         $rs.SessionStateProxy.SetVariable('SpotifyCatalogManifestUrl', $Script:SpotifyCatalogManifestUrl)
+        $rs.SessionStateProxy.SetVariable('SpotifyUpdateEndpointNeedle',  $Script:SpotifyUpdateEndpointNeedle)
+        $rs.SessionStateProxy.SetVariable('SpotifyUpdateEndpointPatched', $Script:SpotifyUpdateEndpointPatched)
         $rs.SessionStateProxy.SetVariable('ConfigPath',          $Script:ConfigPath)
         $rs.SessionStateProxy.SetVariable('AppStateDir',         $Script:AppStateDir)
         $rs.SessionStateProxy.SetVariable('KeepLog',             [bool]$Script:KeepLog)
@@ -3451,6 +3486,78 @@ function Wait-ForSpotifyRelease {
     } elseif (Test-Path -LiteralPath $Script:Config.SpotifyExePath) {
         Wait-ForFileRelease -Path $Script:Config.SpotifyExePath
     }
+}
+
+function Find-BytePattern {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Pattern,
+        [int]$ChunkSize = 1048576
+    )
+
+    $offsets = New-Object System.Collections.Generic.List[long]
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $offsets }
+
+    $patternLen = $Pattern.Length
+    $buffer     = [byte[]]::new([Math]::Max(4096, $ChunkSize))
+    $overlap    = [long]($patternLen - 1)
+    $base       = [long]0
+    $fs         = $null
+    try {
+        # ReadWrite share: the probe must work even while Spotify is running.
+        $fs = [System.IO.File]::Open($Path, 'Open', 'Read', [System.IO.FileShare]::ReadWrite)
+        while (($read = $fs.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $chunk = if ($read -eq $buffer.Length) { $buffer } else { $buffer[0..($read - 1)] }
+            $text = [System.Text.Encoding]::ASCII.GetString($chunk)
+            $idx = $text.IndexOf($Pattern, [System.StringComparison]::Ordinal)
+            while ($idx -ge 0) {
+                $abs = $base + $idx
+                if (-not $offsets.Contains($abs)) { $offsets.Add($abs) }
+                $idx = $text.IndexOf($Pattern, $idx + 1, [System.StringComparison]::Ordinal)
+            }
+            # Re-read the tail so patterns that span a chunk boundary are still found.
+            $seekBack = [Math]::Min($overlap, $base + $read)
+            if ($seekBack -gt 0 -and $fs.Position -lt $fs.Length) {
+                $null = $fs.Seek(-$seekBack, [System.IO.SeekOrigin]::Current)
+            }
+            $base = $fs.Position
+        }
+    } finally {
+        if ($null -ne $fs) { $fs.Dispose() }
+    }
+    return $offsets
+}
+
+function Get-SpotifyEndpointFileState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [PSCustomObject]@{ Patched = $false; NeedlePresent = $false; Available = $false }
+    }
+
+    $key = $null
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $key = "{0}|{1}|{2}" -f $Path, $item.Length, $item.LastWriteTimeUtc.Ticks
+    } catch {
+        return [PSCustomObject]@{ Patched = $false; NeedlePresent = $false; Available = $false }
+    }
+    if ($Script:EndpointScanCache.ContainsKey($key)) {
+        return $Script:EndpointScanCache[$key]
+    }
+
+    $patchedHits = @(Find-BytePattern -Path $Path -Pattern $Script:SpotifyUpdateEndpointPatched)
+    $needleHits  = @(Find-BytePattern -Path $Path -Pattern $Script:SpotifyUpdateEndpointNeedle)
+    $value = [PSCustomObject]@{
+        Patched       = ($patchedHits.Count -gt 0)
+        NeedlePresent = ($needleHits.Count -gt 0)
+        Available     = $true
+    }
+    if ($Script:EndpointScanCache.Count -gt 8) { $Script:EndpointScanCache.Clear() }
+    $Script:EndpointScanCache[$key] = $value
+    return $value
 }
 
 function Get-FreeDiskSpaceMB {
@@ -4169,12 +4276,35 @@ function Set-DenyWriteAcl {
     }
     $acl = Get-Acl -LiteralPath $Path
 
+    # Write/create rights ONLY. Delete and DeleteSubdirectoriesAndFiles must stay
+    # allowed: Spotify deletes stale files inside the Update directories during
+    # normal startup housekeeping, and denying Delete made the client fail to
+    # launch. Denying create/write is still enough to keep the block effective --
+    # the updater cannot stage a new payload (Spotify_new.exe) it is not allowed
+    # to create or fill, and the endpoint patch remains the primary block.
     $denyRights = [System.Security.AccessControl.FileSystemRights]::WriteData -bor
                    [System.Security.AccessControl.FileSystemRights]::AppendData -bor
                    [System.Security.AccessControl.FileSystemRights]::CreateFiles -bor
-                   [System.Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+                   [System.Security.AccessControl.FileSystemRights]::CreateDirectories
+
+    # Older versions of this tool also denied Delete/DeleteSubdirectoriesAndFiles.
+    # Those ACEs are still recognised as ours so -Remove can clean them up.
+    $legacyDenyRights = $denyRights -bor
                    [System.Security.AccessControl.FileSystemRights]::Delete -bor
                    [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
+
+    $isOurDenyRule = {
+        param($Rule)
+        try {
+            $sid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+            if ($sid.Value -ne 'S-1-1-0') { return $false }
+            $rights = [int64]$Rule.FileSystemRights
+            return ((($rights -band [int64]$denyRights) -eq $rights) -or
+                    (($rights -band [int64]$legacyDenyRights) -eq $rights))
+        } catch {
+            return $false
+        }
+    }
 
     if ($Remove) {
 
@@ -4183,12 +4313,7 @@ function Set-DenyWriteAcl {
         $foreign = 0
         foreach ($rule in @($acl.Access)) {
             if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Deny) { continue }
-            $isOurs = $false
-            try {
-                $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
-                $isOurs = ($sid.Value -eq 'S-1-1-0') -and
-                    (([int64]$rule.FileSystemRights -band [int64]$denyRights) -eq [int64]$rule.FileSystemRights)
-            } catch { $isOurs = $false }
+            $isOurs = & $isOurDenyRule -Rule $rule
             if (-not $isOurs) {
                 $foreign++
                 continue
@@ -4208,13 +4333,7 @@ function Set-DenyWriteAcl {
             $check = Get-Acl -LiteralPath $Path
             foreach ($r in @($check.Access)) {
                 if ($r.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Deny) { continue }
-                $ours = $false
-                try {
-                    $rsid = $r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
-                    $ours = ($rsid.Value -eq 'S-1-1-0') -and
-                        (([int64]$r.FileSystemRights -band [int64]$denyRights) -eq [int64]$r.FileSystemRights)
-                } catch { $ours = $false }
-                if ($ours) { $remaining++ }
+                if (& $isOurDenyRule -Rule $r) { $remaining++ }
             }
         } catch { }
         if ($foreign -gt 0) {
@@ -4240,6 +4359,333 @@ function Set-DenyWriteAcl {
     $acl.AddAccessRule($rule)
     Set-Acl -LiteralPath $Path -AclObject $acl
     return $true
+}
+
+function Get-SpotifyUpdateBlockFlag {
+
+    [CmdletBinding()]
+    param()
+
+    # Documented Spotify CLI switch (see spicetify docs "Spotify CLI Flags"):
+    # points the update endpoint at a dead local URL, disabling update checks
+    # without touching any program file.
+    return '--update-endpoint-override=http://localhost'
+}
+
+function Test-SmartAppControlEnabled {
+
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'The registry probe is best-effort: when the Smart App Control state cannot be read the function falls back to off so the block flow can continue with the launch verification as the safety net.')]
+    [CmdletBinding()]
+    param()
+
+    # Windows 11 Smart App Control refuses to run executables whose signature is
+    # invalid or unknown. A byte-patched Spotify.exe has a broken signature and
+    # would be blocked from launching -- the endpoint patch must be skipped then.
+    try {
+        $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy'
+        if (-not (Test-Path -LiteralPath $key)) { return $false }
+        $v = Get-ItemPropertyValue -LiteralPath $key -Name 'VerifiedAndReputablePolicyState' -ErrorAction SilentlyContinue
+        if ($null -eq $v) { return $false }
+        return ([int]$v -ne 0)   # 1 = On, 2 = Evaluation mode
+    } catch {
+        return $false
+    }
+}
+
+function Get-SpotifyLauncherShortcutPaths {
+
+    [CmdletBinding()]
+    param()
+
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($special in @('Desktop', 'Programs')) {
+        try {
+            $p = [Environment]::GetFolderPath($special)
+            if (-not [string]::IsNullOrWhiteSpace($p)) { $roots.Add($p) }
+        } catch { }
+    }
+    # Quick Launch is not an Environment.SpecialFolder member -- use the canonical
+    # path directly; its recursive scan also covers Taskbar pins
+    # (...\Quick Launch\User Pinned\TaskBar\Spotify.lnk).
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        $roots.Add((Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch'))
+    }
+
+    $found = New-Object System.Collections.Generic.List[string]
+    $seen  = @{}
+    foreach ($root in $roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $items = @()
+        try {
+            $items = @(Get-ChildItem -LiteralPath $root -Filter '*.lnk' -Recurse -Depth 3 -Force -ErrorAction SilentlyContinue)
+        } catch { $items = @() }
+        foreach ($it in $items) {
+            if ($it.Name -notmatch '(?i)spotify') { continue }
+            $key = $it.FullName.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $found.Add($it.FullName)
+        }
+    }
+    return $found
+}
+
+function Set-SpotifyLauncherUpdateFlag {
+
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([switch]$Remove)
+
+    $flag    = Get-SpotifyUpdateBlockFlag
+    $patched = New-Object System.Collections.Generic.List[string]
+    $removed = New-Object System.Collections.Generic.List[string]
+    $failed  = New-Object System.Collections.Generic.List[string]
+    $already = 0
+
+    $shell = $null
+    try { $shell = New-Object -ComObject WScript.Shell } catch {
+        Write-Log -Message "WScript.Shell COM is unavailable -- launcher flag layer skipped: $($_.Exception.Message)" -Level WARN
+    }
+
+    if ($null -ne $shell) {
+        foreach ($lnk in @(Get-SpotifyLauncherShortcutPaths)) {
+            try {
+                $sc     = $shell.CreateShortcut($lnk)
+                $target = "$($sc.TargetPath)"
+                if ($target -notmatch '(?i)spotify\.exe$' -or $target -match '(?i)uninstall') { continue }
+                $currentArgs = "$($sc.Arguments)"
+                $hasFlag     = $currentArgs.Contains($flag)
+                $action      = if ($Remove) { 'Remove update-block launch flag' } else { 'Add update-block launch flag' }
+                if (-not $PSCmdlet.ShouldProcess($lnk, $action)) { continue }
+                if ($Remove) {
+                    if (-not $hasFlag) { continue }
+                    $sc.Arguments = (($currentArgs.Replace($flag, '')) -replace '\s{2,}', ' ').Trim()
+                    $sc.Save()
+                    $removed.Add($lnk)
+                } else {
+                    if ($hasFlag) { $already++; continue }
+                    $sc.Arguments = ((($currentArgs + ' ' + $flag).Trim()) -replace '\s{2,}', ' ')
+                    $sc.Save()
+                    $patched.Add($lnk)
+                }
+            } catch {
+                $failed.Add($lnk)
+                Write-Log -Message "Launcher flag could not be updated for ${lnk}: $($_.Exception.Message)" -Level WARN
+            }
+        }
+    }
+
+    $runKeyPath   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $runKeyTouched = $false
+    try {
+        $runVal = $null
+        try { $runVal = Get-ItemPropertyValue -LiteralPath $runKeyPath -Name 'Spotify' -ErrorAction SilentlyContinue } catch { $runVal = $null }
+        $runStr = "$runVal"
+        if (-not [string]::IsNullOrWhiteSpace($runStr) -and $runStr -match '(?i)spotify') {
+            $hasFlag = $runStr.Contains($flag)
+            $action  = if ($Remove) { 'Remove update-block launch flag from the autostart entry' } else { 'Add update-block launch flag to the autostart entry' }
+            if ($Remove -and $hasFlag) {
+                if ($PSCmdlet.ShouldProcess($runKeyPath, $action)) {
+                    Set-ItemProperty -LiteralPath $runKeyPath -Name 'Spotify' -Value ((($runStr.Replace($flag, '')) -replace '\s{2,}', ' ').Trim())
+                    $removed.Add("$runKeyPath (autostart)")
+                    $runKeyTouched = $true
+                }
+            } elseif (-not $Remove -and -not $hasFlag) {
+                if ($PSCmdlet.ShouldProcess($runKeyPath, $action)) {
+                    Set-ItemProperty -LiteralPath $runKeyPath -Name 'Spotify' -Value ((($runStr + ' ' + $flag).Trim()) -replace '\s{2,}', ' ')
+                    $patched.Add("$runKeyPath (autostart)")
+                    $runKeyTouched = $true
+                }
+            } elseif (-not $Remove -and $hasFlag) {
+                $already++
+            }
+        }
+    } catch {
+        Write-Log -Message "The autostart entry could not be adjusted: $($_.Exception.Message)" -Level WARN
+    }
+
+    return [PSCustomObject]@{
+        Flag          = $flag
+        Patched       = @($patched)
+        Removed       = @($removed)
+        Already       = $already
+        Failed        = @($failed)
+        RunKeyTouched = $runKeyTouched
+    }
+}
+
+function Get-SpotifyLauncherUpdateFlagState {
+
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'Every probe here is best-effort: unreadable shortcuts or registry values simply do not count toward the launcher-flag state.') ]
+    [CmdletBinding()]
+    param()
+
+    $flag    = Get-SpotifyUpdateBlockFlag
+    $flagged = New-Object System.Collections.Generic.List[string]
+    $total   = 0
+
+    $shell = $null
+    try { $shell = New-Object -ComObject WScript.Shell } catch { }
+    if ($null -ne $shell) {
+        foreach ($lnk in @(Get-SpotifyLauncherShortcutPaths)) {
+            try {
+                $sc     = $shell.CreateShortcut($lnk)
+                $target = "$($sc.TargetPath)"
+                if ($target -notmatch '(?i)spotify\.exe$' -or $target -match '(?i)uninstall') { continue }
+                $total++
+                if ("$($sc.Arguments)".Contains($flag)) { $flagged.Add($lnk) }
+            } catch { }
+        }
+    }
+
+    $runFlagged = $false
+    try {
+        $runVal = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Spotify' -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace("$runVal")) {
+            $total++
+            if ("$runVal".Contains($flag)) {
+                $runFlagged = $true
+                $flagged.Add('HKCU Run (autostart)')
+            }
+        }
+    } catch { }
+
+    return [PSCustomObject]@{
+        Flag             = $flag
+        FlaggedLaunchers = @($flagged)
+        TotalLaunchers   = $total
+        RunKeyFlagged    = $runFlagged
+        Probed           = ($null -ne $shell)
+    }
+}
+
+function Test-SpotifyLaunchHealth {
+
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'MainWindowHandle probes can throw for processes that are exiting; the polling loop simply takes the next sample.')]
+    [CmdletBinding()]
+    param(
+        [int]$TimeoutMs = 30000,
+        [int]$StableMs  = 12000
+    )
+
+    $exe = "$($Script:Config.SpotifyExePath)"
+    if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe)) {
+        return [PSCustomObject]@{ Healthy = $false; Reason = "Spotify.exe was not found at '$exe' (antivirus may have quarantined the patched file)" }
+    }
+
+    try {
+        Start-Process -FilePath $exe -WorkingDirectory (Split-Path -Path $exe -Parent) -PassThru | Out-Null
+    } catch {
+        return [PSCustomObject]@{ Healthy = $false; Reason = "Spotify could not be started: $($_.Exception.Message)" }
+    }
+
+    $sw   = [System.Diagnostics.Stopwatch]::StartNew()
+    $seen = $false
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        Start-Sleep -Milliseconds 700
+        $procs = @(Get-Process -Name 'Spotify' -ErrorAction SilentlyContinue)
+        if ($procs.Count -gt 0) {
+            $seen = $true
+            foreach ($p in $procs) {
+                try {
+                    if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+                        return [PSCustomObject]@{ Healthy = $true; Reason = 'the main window appeared' }
+                    }
+                } catch { }
+            }
+            if ($sw.ElapsedMilliseconds -ge $StableMs) {
+                return [PSCustomObject]@{ Healthy = $true; Reason = "Spotify processes stayed alive for $([int]($sw.ElapsedMilliseconds / 1000))s" }
+            }
+        } elseif ($seen -and $sw.ElapsedMilliseconds -ge $StableMs) {
+            return [PSCustomObject]@{ Healthy = $false; Reason = 'Spotify started but exited on its own within seconds' }
+        }
+    }
+    if ($seen) {
+        return [PSCustomObject]@{ Healthy = $true; Reason = 'Spotify processes were still alive at the end of the check' }
+    }
+    return [PSCustomObject]@{ Healthy = $false; Reason = "no Spotify process appeared within $([int]($TimeoutMs / 1000))s" }
+}
+
+function Set-SpotifyEndpointPatch {
+
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([switch]$Remove)
+
+    $paths = Get-SpotifyUpdateGuardScope
+    $installDir = "$($paths.InstallDir)"
+
+    $targets = @()
+    foreach ($name in @('Spotify.exe', 'Spotify.dll')) {
+        $p = Join-Path $installDir $name
+        if (Test-Path -LiteralPath $p -PathType Leaf) { $targets += $p }
+    }
+
+    $needle      = if ($Remove) { $Script:SpotifyUpdateEndpointPatched } else { $Script:SpotifyUpdateEndpointNeedle }
+    $otherState  = if ($Remove) { $Script:SpotifyUpdateEndpointNeedle } else { $Script:SpotifyUpdateEndpointPatched }
+    $replacement = if ($Remove) { $Script:SpotifyUpdateEndpointNeedle } else { $Script:SpotifyUpdateEndpointPatched }
+
+    $patched = New-Object System.Collections.Generic.List[string]
+    $missing = New-Object System.Collections.Generic.List[string]
+    $failed  = New-Object System.Collections.Generic.List[string]
+    $already = 0
+
+    foreach ($file in $targets) {
+        $leaf = Split-Path -Leaf $file
+        $offsets = @(Find-BytePattern -Path $file -Pattern $needle)
+        if ($offsets.Count -eq 0) {
+            $otherHits = @(Find-BytePattern -Path $file -Pattern $otherState)
+            if ($otherHits.Count -gt 0) {
+                $already++
+                Write-Log -Message "Update endpoint already in the desired state in $leaf." -Level INFO
+            } else {
+                $missing.Add($file)
+                Write-Log -Message "Update endpoint pattern not found in $leaf." -Level DEBUG
+            }
+            continue
+        }
+
+        $action = if ($Remove) { 'Restore update endpoint' } else { 'Patch update endpoint' }
+        if (-not $PSCmdlet.ShouldProcess($leaf, "$action ($($offsets.Count) occurrence(s))")) { continue }
+
+        try {
+            $bytes  = [System.Text.Encoding]::ASCII.GetBytes($replacement)
+            $stream = $null
+            try {
+                $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', [System.IO.FileShare]::None)
+            } catch [System.IO.IOException] {
+                Write-Step -Message "  Spotify must be closed to patch $leaf -- closing it." -Type WARN
+                Stop-SpotifyProcess -Force
+                Wait-ForFileRelease -Path $file
+                $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', [System.IO.FileShare]::None)
+            }
+            try {
+                foreach ($off in $offsets) {
+                    $stream.Position = [long]$off
+                    $stream.Write($bytes, 0, $bytes.Length)
+                }
+                $stream.Flush()
+            } finally {
+                $stream.Dispose()
+            }
+
+            $still = @(Find-BytePattern -Path $file -Pattern $needle)
+            if ($still.Count -gt 0) {
+                throw "verification failed: '$needle' is still present after patching"
+            }
+            $patched.Add($file)
+            Write-Log -Message "Update endpoint patched in $leaf ($($offsets.Count) occurrence(s)): '$needle' -> '$replacement'." -Level INFO
+        } catch {
+            $failed.Add($file)
+            Write-Step -Message "  Could not patch the update endpoint in $leaf : $($_.Exception.Message)" -Type WARN
+        }
+    }
+
+    return [PSCustomObject]@{
+        PatchedFiles   = @($patched)
+        AlreadyPatched = $already
+        MissingPattern = @($missing)
+        FailedFiles    = @($failed)
+        TargetCount    = $targets.Count
+    }
 }
 
 function Get-SpotifyUpdateGuardScope {
@@ -4306,21 +4752,64 @@ function Get-SpotifyUpdateBlockState {
     $denyRoaming = Test-PathDenyAcl -Path (Join-Path $paths.RoamingDir 'Update')
     $denyInstall = Test-PathDenyAcl -Path (Join-Path $paths.InstallDir 'Update')
 
+    $endpointPatched = $false
+    $endpointFiles   = @()
+    $needleMissing   = $true
+    $probeFailed     = $false
+    foreach ($name in @('Spotify.exe', 'Spotify.dll')) {
+        $p = Join-Path $paths.InstallDir $name
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
+        try {
+            $es = Get-SpotifyEndpointFileState -Path $p
+            if ($es.Patched) {
+                $endpointPatched = $true
+                $endpointFiles += $p
+                $needleMissing = $false
+            } elseif ($es.NeedlePresent) {
+                $needleMissing = $false
+            }
+        } catch {
+            $probeFailed = $true
+        }
+    }
+
+    $launcher = $null
+    try { $launcher = Get-SpotifyLauncherUpdateFlagState } catch { }
+    $launcherFlagTargets = @()
+    if ($null -ne $launcher) { $launcherFlagTargets = @($launcher.FlaggedLaunchers) }
+    $launcherFlagPatched = ($launcherFlagTargets.Count -gt 0)
+
     return [PSCustomObject]@{
-        Blocked                = ($denyLocal -or $denyRoaming -or $denyInstall -or $guarded.Count -gt 0)
+        # Guard files are NOT part of the block anymore: older versions created empty
+        # Spotify_new.exe placeholders that stopped Spotify from launching. "Blocked"
+        # now means the staging deny ACL, the endpoint patch and/or the launcher
+        # update flag are in place. GuardedFiles/PendingUpdateFiles are still
+        # reported so leftovers from older versions can be diagnosed and swept by
+        # Remove-SpotifyUpdateBlock.
+        Blocked                = ($denyLocal -or $denyRoaming -or $denyInstall -or $endpointPatched -or $launcherFlagPatched)
         DenyOnUpdateDir        = $denyLocal
         DenyOnRoamingUpdateDir = $denyRoaming
         DenyOnInstallUpdateDir = $denyInstall
         InstallDir             = $paths.InstallDir
         GuardedFiles           = $guarded
         PendingUpdateFiles     = $pending
+        EndpointPatched        = $endpointPatched
+        EndpointPatchFiles     = $endpointFiles
+        EndpointNeedleMissing  = $needleMissing
+        EndpointProbeFailed    = $probeFailed
+        LauncherFlagPatched    = $launcherFlagPatched
+        LauncherFlagTargets    = $launcherFlagTargets
     }
 }
 
 function Set-SpotifyUpdateBlock {
 
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingEmptyCatchBlock', '', Justification = 'The installed-version probes are best-effort by design: when the version cannot be read, the function must fall through to the safe default (endpoint patch expected) rather than abort the block.')]
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param([switch]$Force)
+    param(
+        [switch]$Force,
+        [switch]$NoLaunchTest
+    )
 
     Write-Step -Message 'Blocking Spotify automatic updates...' -Type STEP
 
@@ -4330,12 +4819,29 @@ function Set-SpotifyUpdateBlock {
         }
 
         $state = Get-SpotifyUpdateBlockState
-        if ($state.Blocked) {
+
+        # The endpoint patch must actually be present for a modern Spotify install --
+        # unless Smart App Control is on, because a byte-patched Spotify.exe would
+        # then be refused execution by Windows (the patch layer is skipped in that
+        # case and the staging lock + launcher flag carry the block).
+        $endpointExpected = $true
+        try {
+            $installedV = ConvertTo-SpotifyVersion -Version (Get-InstalledSpotifyFileVersion)
+            $thresholdV = ConvertTo-SpotifyVersion -Version '1.1.59'
+            if ($null -ne $installedV -and $null -ne $thresholdV -and $installedV -lt $thresholdV) {
+                $endpointExpected = $false
+            }
+        } catch { }
+        if (Test-SmartAppControlEnabled) { $endpointExpected = $false }
+        if ($state.Blocked -and (-not $endpointExpected -or $state.EndpointPatched)) {
             Write-Step -Message 'Spotify updates are already blocked.' -Type WARN
             return $state
         }
+        if ($state.EndpointPatched) {
+            Write-Step -Message 'Endpoint patch present -- refreshing the update staging lock.' -Type INFO
+        }
 
-        if (-not $PSCmdlet.ShouldProcess('Spotify update staging paths', 'Apply deny ACL')) {
+        if (-not $PSCmdlet.ShouldProcess('Spotify update staging + endpoint + launchers', 'Lock staging folder, set launcher flag, patch endpoint')) {
             return $state
         }
 
@@ -4346,6 +4852,9 @@ function Set-SpotifyUpdateBlock {
 
     $paths = Get-SpotifyUpdateGuardScope
 
+    # ── Layer 0: discard anything already staged for update ──────────────────
+    # (this also sweeps away the empty Spotify_new.exe guard files left behind by
+    # older versions of this tool, so re-blocking repairs a broken old install)
     foreach ($dir in @($paths.Dirs)) {
         foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
             $p = Join-Path $dir $name
@@ -4363,29 +4872,183 @@ function Set-SpotifyUpdateBlock {
         }
     }
 
+    # ── Legacy cleanup: unlock/remove Update folders inside the install and
+    # roaming directories. Older versions of this tool created and write-locked
+    # them; a locked folder inside Spotify's own install directory is exactly
+    # what can confuse the client at launch. The proven method (the one
+    # spicetify's own "spotify-updates block" uses) only locks
+    # %LOCALAPPDATA%\Spotify\Update.
+    $localUpdate = Join-Path $paths.LocalDir 'Update'
     foreach ($dir in @($paths.Dirs)) {
-        $updateDir = Join-Path $dir 'Update'
-        if (-not (Test-Path -LiteralPath $updateDir)) {
-            New-Item -ItemType Directory -Force -Path $updateDir | Out-Null
+        $legacyUpdate = Join-Path $dir 'Update'
+        if ($legacyUpdate -ieq $localUpdate) { continue }
+        if (-not (Test-Path -LiteralPath $legacyUpdate)) { continue }
+        try {
+            if (Test-PathDenyAcl -Path $legacyUpdate) {
+                $null = Set-DenyWriteAcl -Path $legacyUpdate -Remove
+            }
+            if (@(Get-ChildItem -LiteralPath $legacyUpdate -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+                Remove-Item -LiteralPath $legacyUpdate -Force -ErrorAction Stop
+            }
+            Write-Log -Message "Legacy Update lock removed: $legacyUpdate" -Level INFO
+        } catch {
+            Write-Step -Message "  Could not remove the legacy Update lock on $legacyUpdate : $($_.Exception.Message)" -Type WARN
         }
-        $null = Set-DenyWriteAcl -Path $updateDir
-        Write-Log -Message "Deny ACL applied to $updateDir" -Level INFO
     }
 
-    foreach ($dir in @($paths.Dirs)) {
-        if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
-            $p = Join-Path $dir $name
-            if (-not (Test-Path -LiteralPath $p)) {
-                [System.IO.File]::WriteAllText($p, '')
-                $null = Set-DenyWriteAcl -Path $p -IsFile
-                Write-Log -Message "Guard file created: $p" -Level INFO
+    # ── Layer 1 (primary): lock the update staging folder ────────────────────
+    # %LOCALAPPDATA%\Spotify\Update is emptied and then write-locked: the
+    # updater cannot create or fill a payload there. Read and delete stay
+    # allowed so Spotify's normal startup housekeeping is never blocked.
+    Write-Step -Message '  Locking the update staging folder...' -Type STEP
+    if (-not (Test-Path -LiteralPath $paths.LocalDir)) {
+        New-Item -ItemType Directory -Force -Path $paths.LocalDir | Out-Null
+    }
+    if (Test-Path -LiteralPath $localUpdate) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $localUpdate -Force -ErrorAction SilentlyContinue)) {
+            try {
+                Remove-Item -LiteralPath $child.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Step -Message "  Could not clear staged item $($child.FullName) : $($_.Exception.Message)" -Type WARN
             }
         }
+    } else {
+        New-Item -ItemType Directory -Force -Path $localUpdate | Out-Null
+    }
+    $null = Set-DenyWriteAcl -Path $localUpdate
+    Write-Log -Message "Deny ACL applied to $localUpdate (write/create denied for Everyone; read+delete stay allowed so Spotify launches and cleans up normally)." -Level INFO
+
+    # ── Layer 2: the documented Spotify launch flag ──────────────────────────
+    # --update-endpoint-override=http://localhost on every Spotify launcher we
+    # can reach (desktop/start-menu/taskbar shortcuts + the autostart entry).
+    # Pure launch parameter -- cannot corrupt or trip protection on any binary.
+    $flagApplied = $false
+    try {
+        Write-Step -Message '  Adding the update-blocking launch flag to Spotify shortcuts...' -Type STEP
+        $flagResult  = Set-SpotifyLauncherUpdateFlag
+        $flagApplied = ((@($flagResult.Patched).Count + [int]$flagResult.Already) -gt 0)
+        Write-Log -Message "Launcher flag '$($flagResult.Flag)': $(@($flagResult.Patched).Count) patched, $([int]$flagResult.Already) already set, $(@($flagResult.Failed).Count) failed." -Level INFO
+    } catch {
+        Write-Step -Message "  Could not apply the launcher update flag: $($_.Exception.Message)" -Type WARN
     }
 
-    Write-Step -Message 'Spotify updates blocked (deny ACLs on the update staging paths in the install and local folders).' -Type OK
-    Write-Log -Message 'The block is user-scope and reversible at any time (-UnblockUpdates / the GUI toggle). No admin rights are involved.' -Level INFO
+    # ── Layer 3: binary endpoint patch (skipped under Smart App Control) ─────
+    $endpointActive = $false
+    if (Test-SmartAppControlEnabled) {
+        Write-Step -Message '  Windows Smart App Control is ON -- skipping the binary endpoint patch (a modified Spotify.exe would be blocked from launching). The staging lock + launch flag carry the block.' -Type WARN
+        Write-Log -Message 'Endpoint patch skipped: Smart App Control refuses to run executables with an invalidated signature.' -Level WARN
+    } else {
+        Write-Step -Message '  Patching the update-check endpoint inside the Spotify program...' -Type STEP
+        $endpoint = $null
+        try {
+            $endpoint = Set-SpotifyEndpointPatch
+        } catch {
+            throw "The update endpoint patch failed: $($_.Exception.Message). The staging lock and the launch flag are in place -- close Spotify and re-run the block to retry the patch."
+        }
+        $endpointActive = (@($endpoint.PatchedFiles).Count -gt 0 -or $endpoint.AlreadyPatched -gt 0)
+        if ($endpointActive -and @($endpoint.FailedFiles).Count -gt 0) {
+            $failedLeaves = (@($endpoint.FailedFiles) | ForEach-Object { Split-Path -Leaf $_ }) -join ', '
+            Write-Step -Message "  Some files could not be patched ($failedLeaves) -- the patch on the remaining files is usually sufficient." -Type WARN
+        }
+        if (-not $endpointActive) {
+            $endpointExpected = $true
+            $installedVersionText = ''
+            try {
+                $installedVersionText = Get-InstalledSpotifyFileVersion
+                $installedV = ConvertTo-SpotifyVersion -Version $installedVersionText
+                $thresholdV = ConvertTo-SpotifyVersion -Version '1.1.59'
+                if ($null -ne $installedV -and $null -ne $thresholdV -and $installedV -lt $thresholdV) {
+                    $endpointExpected = $false
+                }
+            } catch { }
+            if (@($endpoint.FailedFiles).Count -gt 0 -and $endpointExpected) {
+                $failedLeaves = (@($endpoint.FailedFiles) | ForEach-Object { Split-Path -Leaf $_ }) -join ', '
+                throw "The update endpoint could not be patched in: $failedLeaves -- close Spotify and run the block again."
+            }
+            if ($endpointExpected) {
+                throw "The update-check endpoint pattern was not found in the Spotify program files (installed: '$installedVersionText'). Spotify may have changed its updater -- please report this with the log file. The staging lock + launch flag remain in place."
+            }
+            Write-Step -Message '  Legacy Spotify detected -- the endpoint patch is not applicable to this version; the staging lock covers it.' -Type INFO
+        }
+    }
+
+    # ── Launch verification with staged rollback ─────────────────────────────
+    # The block must never leave Spotify unlaunchable. Start it, watch that it
+    # stays up; if it does not, revert the most intrusive layer (binary patch)
+    # first, then the staging lock, then the launch flag -- and re-test after
+    # each revert. Whichever layer is incompatible with this PC ends up
+    # removed and the remaining layers keep the block alive.
+    if (-not $Force -and -not $NoLaunchTest -and -not $WhatIfPreference) {
+        Write-Step -Message '  Verifying that Spotify still launches with the block in place...' -Type STEP
+        try { Stop-SpotifyProcess -Force } catch {
+            Write-Step -Message "  Could not close Spotify for the launch check: $($_.Exception.Message)" -Type WARN
+        }
+        Start-Sleep -Milliseconds 800
+        $health = Test-SpotifyLaunchHealth
+        if ($health.Healthy) {
+            Write-Step -Message "  Launch check passed ($($health.Reason))." -Type OK
+        } else {
+            Write-Step -Message "  Spotify did not stay running ($($health.Reason)) -- rolling back the most intrusive layer and retrying..." -Type WARN
+            Write-Log -Message "Launch check failed: $($health.Reason). Starting staged rollback." -Level WARN
+            $revertedLayers = New-Object System.Collections.Generic.List[string]
+
+            if ($endpointActive) {
+                try { Stop-SpotifyProcess -Force } catch { }
+                try {
+                    $null = Set-SpotifyEndpointPatch -Remove
+                    $endpointActive = $false
+                    $null = $revertedLayers.Add('endpoint patch')
+                    Write-Log -Message 'Rolled back the binary endpoint patch.' -Level WARN
+                } catch {
+                    Write-Step -Message "  Could not revert the endpoint patch: $($_.Exception.Message)" -Type WARN
+                }
+                Start-Sleep -Milliseconds 800
+                $health = Test-SpotifyLaunchHealth
+                if ($health.Healthy) {
+                    Write-Step -Message '  The binary endpoint patch was preventing Spotify from launching on this PC (antivirus / Smart App Control-style blocking of modified executables). It was reverted -- the staging lock + launch flag remain active.' -Type WARN
+                }
+            }
+            if (-not $health.Healthy) {
+                try { Stop-SpotifyProcess -Force } catch { }
+                try {
+                    $null = Set-DenyWriteAcl -Path $localUpdate -Remove
+                    $null = $revertedLayers.Add('staging lock')
+                    Write-Log -Message 'Rolled back the staging folder lock.' -Level WARN
+                } catch {
+                    Write-Step -Message "  Could not revert the staging lock: $($_.Exception.Message)" -Type WARN
+                }
+                Start-Sleep -Milliseconds 800
+                $health = Test-SpotifyLaunchHealth
+                if ($health.Healthy) {
+                    Write-Step -Message '  The staging folder lock was preventing Spotify from launching on this PC. It was reverted -- the remaining layers stay active.' -Type WARN
+                }
+            }
+            if (-not $health.Healthy) {
+                try { Stop-SpotifyProcess -Force } catch { }
+                try {
+                    $null = Set-SpotifyLauncherUpdateFlag -Remove
+                    $flagApplied = $false
+                    $null = $revertedLayers.Add('launcher flag')
+                    Write-Log -Message 'Rolled back the launcher update flag.' -Level WARN
+                } catch {
+                    Write-Step -Message "  Could not revert the launcher flag: $($_.Exception.Message)" -Type WARN
+                }
+                Start-Sleep -Milliseconds 800
+                $health = Test-SpotifyLaunchHealth
+            }
+            if (-not $health.Healthy) {
+                throw "Spotify does not launch even with every update-block layer reverted ($($health.Reason)). The launch failure is not caused by the update block -- check Windows Security (Smart App Control / Controlled folder access / Protection history) and your antivirus quarantine, then repair the installation. All block layers have been removed."
+            }
+            Write-Step -Message "  Spotify launches again (reverted: $($revertedLayers -join ', '))." -Type OK
+        }
+    }
+
+    $layers = New-Object System.Collections.Generic.List[string]
+    $null = $layers.Add('update staging folder locked')
+    if ($flagApplied)    { $null = $layers.Add('launch flag set on shortcuts') }
+    if ($endpointActive) { $null = $layers.Add('update-check endpoint patched') }
+    Write-Step -Message "Spotify updates blocked ($($layers -join ' + '))." -Type OK
+    Write-Log -Message 'Layers: (1) deny ACL on %LOCALAPPDATA%\Spotify\Update -- write/create denied for Everyone, read+delete allowed (the method spicetify''s own "spotify-updates block" uses; the folder is emptied first). (2) --update-endpoint-override=http://localhost added to Spotify shortcuts + the autostart entry (documented Spotify CLI flag). (3) binary endpoint patch desktop-update/v2/update -> desktop-update/no/thanks (skipped when Smart App Control is on; automatically reverted if it prevents launch). A post-block launch check verifies Spotify still starts and rolls back any incompatible layer. Everything is reversible (-UnblockUpdates / the GUI toggle). No admin rights are involved.' -Level INFO
     return (Get-SpotifyUpdateBlockState)
 }
 
@@ -4397,23 +5060,53 @@ function Remove-SpotifyUpdateBlock {
     Write-Step -Message 'Unblocking Spotify updates...' -Type STEP
 
     $state = Get-SpotifyUpdateBlockState
-    if (-not $state.Blocked) {
+    # Guard files no longer count toward Blocked, but leftover guard files from
+    # older versions must still be cleaned up -- so do not bail out early when
+    # leftovers are on disk even if the rest of the block is already gone.
+    if (-not $state.Blocked -and @($state.GuardedFiles).Count -eq 0) {
         Write-Step -Message 'Spotify updates are not blocked.' -Type INFO
         return $state
     }
 
-    if (-not $PSCmdlet.ShouldProcess('Spotify update staging paths', 'Remove deny ACL')) {
+    if (-not $PSCmdlet.ShouldProcess('Spotify update endpoint + staging paths + launchers', 'Restore endpoint, remove the staging lock and the launcher flags')) {
         return $state
     }
 
+    # Restore the original update endpoint first: while it stays patched, updates stay
+    # dead regardless of the staging lock and the launch flags.
+    if ($state.EndpointPatched) {
+        Write-Step -Message '  Restoring the original update-check endpoint...' -Type STEP
+        $endpoint = Set-SpotifyEndpointPatch -Remove
+        if (@($endpoint.FailedFiles).Count -gt 0) {
+            $failedLeaves = (@($endpoint.FailedFiles) | ForEach-Object { Split-Path -Leaf $_ }) -join ', '
+            throw "The update endpoint could not be restored in: $failedLeaves. Spotify may be running -- close it and unblock again. The staging lock and the launch flags were left in place."
+        }
+    }
+
     $paths = Get-SpotifyUpdateGuardScope
+
+    $anyFailed = $false
+
+    # Remove the update-blocking launch flag from shortcuts + the autostart entry.
+    try {
+        $flagResult = Set-SpotifyLauncherUpdateFlag -Remove
+        if (@($flagResult.Removed).Count -gt 0) {
+            Write-Log -Message "Launcher update flag removed from $(@($flagResult.Removed).Count) launcher(s)." -Level INFO
+        }
+        if (@($flagResult.Failed).Count -gt 0) {
+            $anyFailed = $true
+            Write-Step -Message "  The launcher update flag could not be removed from $(@($flagResult.Failed).Count) shortcut(s)." -Type WARN
+        }
+    } catch {
+        $anyFailed = $true
+        Write-Step -Message "  Could not remove the launcher update flag: $($_.Exception.Message)" -Type WARN
+    }
 
     $unlockDirs = @()
     if ($state.DenyOnUpdateDir)        { $unlockDirs += (Join-Path $paths.LocalDir 'Update') }
     if ($state.DenyOnRoamingUpdateDir) { $unlockDirs += (Join-Path $paths.RoamingDir 'Update') }
     if ($state.DenyOnInstallUpdateDir) { $unlockDirs += (Join-Path $paths.InstallDir 'Update') }
 
-    $anyFailed = $false
     $handled   = @{}
     foreach ($dir in $unlockDirs) {
         $key = $dir.ToLowerInvariant()
@@ -4429,15 +5122,49 @@ function Remove-SpotifyUpdateBlock {
         }
     }
 
-    foreach ($guard in @($state.GuardedFiles)) {
-        if (-not (Test-Path -LiteralPath $guard)) { continue }
+    # Remove now-unlocked, empty Update folders (spicetify's own unblock method is
+    # "delete the Update folder"; the updater recreates it when it needs it). This
+    # also clears the empty folders older versions of this tool created inside the
+    # install directory.
+    $cleanupDirs = New-Object System.Collections.Generic.List[string]
+    foreach ($dir in @($paths.Dirs)) {
+        $u = Join-Path $dir 'Update'
+        $dupe = $false
+        foreach ($e in $cleanupDirs) { if ($e -ieq $u) { $dupe = $true; break } }
+        if (-not $dupe) { $cleanupDirs.Add($u) }
+    }
+    foreach ($dir in $cleanupDirs) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
         try {
-            $null = Set-DenyWriteAcl -Path $guard -Remove -IsFile
-            Remove-Item -LiteralPath $guard -Force -ErrorAction Stop
-            Write-Log -Message "Guard file removed: $guard" -Level INFO
+            if (@(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+                Remove-Item -LiteralPath $dir -Force -ErrorAction Stop
+                Write-Log -Message "Empty Update folder removed: $dir" -Level INFO
+            }
         } catch {
-            $anyFailed = $true
-            Write-Step -Message "  Could not remove guard file $guard -- delete it manually (or run: icacls `"$guard`" /remove:d Everyone)" -Type WARN
+            Write-Step -Message "  Could not remove the empty Update folder $dir : $($_.Exception.Message)" -Type WARN
+        }
+    }
+
+    # Sweep ALL leftover guard/staged files (from old or new block versions): the
+    # empty Spotify_new.exe placeholders older versions created break Spotify
+    # startup, so the unblock path always removes them wherever they are found.
+    foreach ($dir in @($paths.Dirs)) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($name in @('Spotify_new.exe', 'Spotify_new.exe.sig')) {
+            $guard = Join-Path $dir $name
+            if (-not (Test-Path -LiteralPath $guard)) { continue }
+            try {
+                # Remove the deny ACL first if present (also matches the old-style
+                # ACEs that included Delete rights).
+                if (Test-PathDenyAcl -Path $guard) {
+                    $null = Set-DenyWriteAcl -Path $guard -Remove -IsFile
+                }
+                Remove-Item -LiteralPath $guard -Force -ErrorAction Stop
+                Write-Log -Message "Guard file removed: $guard" -Level INFO
+            } catch {
+                $anyFailed = $true
+                Write-Step -Message "  Could not remove guard file $guard -- delete it manually (or run: icacls `"$guard`" /remove:d Everyone)" -Type WARN
+            }
         }
     }
 
@@ -4690,6 +5417,52 @@ function Invoke-SpotifyLeftoverCleanup {
         $Script:Config.SpotifyInstallDir,
         (Join-Path $env:LOCALAPPDATA 'Spotify')
     )
+
+    # Data protection: the CEF browser profile (Local\Spotify\Browser) holds the Marketplace
+    # database (installed extensions/themes/snippets + settings). The swap normally stages it
+    # away before this point; if it is still here, rescue it instead of deleting it.
+    $browserDir = Get-SpotifyBrowserProfileDir
+    if (Test-Path -LiteralPath $browserDir) {
+        $rescued = $false
+        try {
+            New-Item -ItemType Directory -Force -Path $Script:AppStateDir -ErrorAction Stop | Out-Null
+            $browserRescue = Join-Path $Script:AppStateDir ("BrowserProfileRescue_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+            $n = 1
+            while (Test-Path -LiteralPath $browserRescue) {
+                $browserRescue = Join-Path $Script:AppStateDir ("BrowserProfileRescue_{0}_{1}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'), $n)
+                $n++
+            }
+            Move-Item -LiteralPath $browserDir -Destination $browserRescue -Force -ErrorAction Stop
+            Write-Log -Message "Browser profile rescued to $browserRescue before the leftover cleanup (it was not staged)." -Level WARN
+            $rescued = $true
+        } catch {
+            # Move failed (locked?) -- fall back to copying the storage databases.
+            try {
+                New-Item -ItemType Directory -Force -Path $Script:AppStateDir -ErrorAction Stop | Out-Null
+                $browserRescue = Join-Path $Script:AppStateDir ("BrowserProfileRescue_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+                $n = 1
+                while (Test-Path -LiteralPath $browserRescue) {
+                    $browserRescue = Join-Path $Script:AppStateDir ("BrowserProfileRescue_{0}_{1}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'), $n)
+                    $n++
+                }
+                New-Item -ItemType Directory -Force -Path $browserRescue | Out-Null
+                foreach ($storageName in @('Local Storage', 'IndexedDB')) {
+                    $storageSrc = Join-Path $browserDir $storageName
+                    if (Test-Path -LiteralPath $storageSrc) {
+                        Copy-ItemSafe -Source $storageSrc -Destination (Join-Path $browserRescue $storageName) -Recurse
+                    }
+                }
+                Write-Log -Message "Browser storage databases copied to $browserRescue before the leftover cleanup." -Level WARN
+                $rescued = $true
+            } catch {
+                Write-Log -Message "Could not rescue the browser profile before cleanup: $($_.Exception.Message) -- continuing, but Marketplace data may be lost." -Level ERROR
+            }
+        }
+        if ($rescued) {
+            Write-Step -Message "  Browser profile data rescued to the app state folder (see the log)." -Type WARN
+        }
+    }
+
     foreach ($p in $targets) {
         if (Test-Path -LiteralPath $p) {
             try {
@@ -4736,6 +5509,72 @@ function Invoke-SpotifyLeftoverCleanup {
     } else {
         Write-Log -Message "Leftover removal failed (continuing): $uninstallerExe -- $lastErr (the uninstaller copy is still locked; it is harmless and can be deleted after the next reboot)" -Level WARN
     }
+}
+
+function Get-SpotifyBrowserProfileDir {
+    [CmdletBinding()]
+    param()
+    return (Join-Path (Join-Path $env:LOCALAPPDATA 'Spotify') 'Browser')
+}
+
+function Invoke-SpotifyBrowserProfileStage {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StagingDir)
+
+    $browserDir = Get-SpotifyBrowserProfileDir
+    if (-not (Test-Path -LiteralPath $browserDir)) {
+        Write-Log -Message 'No Spotify browser profile found -- nothing extra to preserve (fresh client data after the swap).' -Level INFO
+        return $false
+    }
+
+    $dst = Join-Path $StagingDir 'browserprofile'
+    if (Test-Path -LiteralPath $dst) {
+        Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction Stop
+    }
+
+    $moved   = $false
+    $lastErr = ''
+    foreach ($attempt in 1..3) {
+        Assert-NotCancelled
+        try {
+            if (-not (Test-Path -LiteralPath $StagingDir)) {
+                New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
+            }
+            Move-Item -LiteralPath $browserDir -Destination $dst -Force -ErrorAction Stop
+            $moved = $true
+            break
+        } catch {
+            $lastErr = $_.Exception.Message
+            Start-SleepCancellable -Milliseconds 500
+        }
+    }
+    if (-not $moved) {
+        # Abort rather than let the uninstall/leftover cleanup destroy the profile.
+        throw "Could not stage the Spotify browser profile ($browserDir): $lastErr. Aborting so Marketplace data (installed extensions/themes/snippets and settings) is not destroyed -- close Spotify and retry."
+    }
+    Write-Step -Message '  Preserved browser profile (Marketplace data, web logins).' -Type INFO
+    return $true
+}
+
+function Invoke-SpotifyBrowserProfileRestore {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StagingDir)
+
+    $src = Join-Path $StagingDir 'browserprofile'
+    if (-not (Test-Path -LiteralPath $src)) { return $false }
+
+    $browserDir = Get-SpotifyBrowserProfileDir
+    $parent     = Split-Path -Parent $browserDir
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    if (Test-Path -LiteralPath $browserDir) {
+        Remove-Item -LiteralPath $browserDir -Recurse -Force -ErrorAction Stop
+    }
+    Move-Item -LiteralPath $src -Destination $browserDir -Force -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $browserDir)) { throw 'Browser profile restore did not land.' }
+    Write-Step -Message '  Browser profile restored (Marketplace data kept).' -Type INFO
+    return $true
 }
 
 function Invoke-SpotifyUserdataStage {
@@ -4851,6 +5690,45 @@ function Save-StagedUserdata {
     return $quarantine
 }
 
+function Save-StagedBrowserProfile {
+
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StagingPath,
+        [switch]$NoRestore
+    )
+
+    $src = Join-Path $StagingPath 'browserprofile'
+    if (-not (Test-Path -LiteralPath $src)) { return '' }
+
+    if (-not $NoRestore) {
+        try {
+            $null = Invoke-SpotifyBrowserProfileRestore -StagingDir $StagingPath
+            Write-Log -Message "Browser profile restored into $(Get-SpotifyBrowserProfileDir) during the staging rescue." -Level WARN
+            return ''
+        } catch {
+            Write-Log -Message "Direct browser profile restore failed ($($_.Exception.Message)) -- quarantining instead." -Level ERROR
+        }
+    }
+
+    $quarantine = ''
+    try {
+        New-Item -ItemType Directory -Force -Path $Script:AppStateDir -ErrorAction Stop | Out-Null
+        $quarantine = Join-Path $Script:AppStateDir ("BrowserProfileRescue_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        $n = 1
+        while (Test-Path -LiteralPath $quarantine) {
+            $quarantine = Join-Path $Script:AppStateDir ("BrowserProfileRescue_{0}_{1}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'), $n)
+            $n++
+        }
+        Move-Item -LiteralPath $src -Destination $quarantine -Force -ErrorAction Stop
+        Write-Log -Message "BROWSER PROFILE QUARANTINED at $quarantine (the only copy was in staging). Copy it into $(Get-SpotifyBrowserProfileDir) manually if needed." -Level ERROR
+    } catch {
+        Write-Log -Message "BROWSER PROFILE COULD NOT BE RESCUED from $src -- recover it manually before deleting anything." -Level ERROR
+        throw
+    }
+    return $quarantine
+}
+
 function Invoke-SpotifyRegistryWrite {
 
     [CmdletBinding()]
@@ -4921,6 +5799,11 @@ function Invoke-SpotifyVersionSwap {
 
         $null = Invoke-SpotifyUserdataStage -StagingDir $stagingDir
 
+        # The CEF browser profile (Local\Spotify\Browser) holds the Marketplace database
+        # (installed extensions/themes/snippets and their settings, via IndexedDB/localStorage).
+        # Stage it away so the uninstaller and the leftover cleanup cannot destroy it.
+        $null = Invoke-SpotifyBrowserProfileStage -StagingDir $stagingDir
+
         Invoke-SpotifyCurrentUninstall
 
         if (Test-Path -LiteralPath $Script:Config.SpotifyInstallDir) {
@@ -4954,6 +5837,10 @@ function Invoke-SpotifyVersionSwap {
         Invoke-SpotifyRegistryWrite -FullVersion $Entry.Full
 
         $null = Invoke-SpotifyUserdataRestore -StagingDir $stagingDir
+
+        # Put the browser profile back (same behaviour as a normal Spotify self-update,
+        # which never touches Local\Spotify\Browser).
+        $null = Invoke-SpotifyBrowserProfileRestore -StagingDir $stagingDir
     } catch {
 
         Stop-SpotifyUninstaller
@@ -4973,6 +5860,14 @@ function Invoke-SpotifyVersionSwap {
                     Write-Log -Message "USER DATA COULD NOT BE RESCUED from $dataDir -- recover it manually before deleting anything." -Level ERROR
                 }
             }
+        }
+
+        # Rescue the browser profile the same way (restore first, quarantine on failure)
+        # so Marketplace data survives a failed swap.
+        try {
+            $null = Save-StagedBrowserProfile -StagingPath $stagingDir
+        } catch {
+            Write-Log -Message "Browser profile rescue failed on the error path: $($_.Exception.Message)" -Level ERROR
         }
         throw
     } finally {
@@ -5431,6 +6326,26 @@ function Backup-UserCustomizations {
             }
         }
 
+        # Marketplace keeps its data (installed extensions/themes/snippets and settings) in
+        # the Spotify browser profile, NOT in the spicetify folders. Snapshot the small
+        # storage databases so the backup history actually covers Marketplace items.
+        $browserDir = Get-SpotifyBrowserProfileDir
+        if (Test-Path -LiteralPath $browserDir) {
+            try {
+                $bpDst = Join-Path $Script:StagingPath 'BrowserProfile'
+                New-Item -ItemType Directory -Force -Path $bpDst | Out-Null
+                foreach ($storageName in @('Local Storage', 'IndexedDB')) {
+                    $storageSrc = Join-Path $browserDir $storageName
+                    if (Test-Path -LiteralPath $storageSrc) {
+                        Copy-ItemSafe -Source $storageSrc -Destination (Join-Path $bpDst $storageName) -Recurse
+                    }
+                }
+                Write-Log -Message 'Browser storage databases (Marketplace data) added to the backup.' -Level INFO
+            } catch {
+                Write-Log -Message "Browser storage backup skipped (non-fatal): $($_.Exception.Message)" -Level WARN
+            }
+        }
+
         $Script:StagingValid = $true
         New-Item -ItemType File -Path (Join-Path $Script:StagingPath '.backup_complete') -Force | Out-Null
         Write-Log -Message 'Backup completed.' -Level SUCCESS
@@ -5537,6 +6452,29 @@ function Restore-UserCustomizations {
                     New-Item -ItemType Directory -Force -Path $appDst | Out-Null
                 }
                 Copy-ItemSafe -Source "$($child.FullName)/*" -Destination $appDst -Recurse -AllowWildcard
+            }
+        }
+
+        # Restore the Marketplace storage databases into the browser profile (idempotent:
+        # a swap that preserved the whole profile already put the same data back).
+        $bpSrc = Join-Path $Script:StagingPath 'BrowserProfile'
+        if (Test-Path -LiteralPath $bpSrc) {
+            $browserDir = Get-SpotifyBrowserProfileDir
+            foreach ($storageName in @('Local Storage', 'IndexedDB')) {
+                $storageSrc = Join-Path $bpSrc $storageName
+                if (-not (Test-Path -LiteralPath $storageSrc)) { continue }
+                try {
+                    $storageDst = Join-Path $browserDir $storageName
+                    if (-not (Test-Path -LiteralPath $browserDir)) {
+                        New-Item -ItemType Directory -Force -Path $browserDir | Out-Null
+                    }
+                    if (Test-Path -LiteralPath $storageDst) {
+                        Remove-Item -LiteralPath $storageDst -Recurse -Force -ErrorAction Stop
+                    }
+                    Copy-ItemSafe -Source $storageSrc -Destination $storageDst -Recurse
+                } catch {
+                    Write-Log -Message "Could not restore browser storage '$storageName' (non-fatal): $($_.Exception.Message)" -Level WARN
+                }
             }
         }
 
@@ -6301,6 +7239,7 @@ function Invoke-Workflow {
                 try {
 
                     $null = Save-StagedUserdata -StagingPath $old.FullName -NoRestore
+                    $null = Save-StagedBrowserProfile -StagingPath $old.FullName -NoRestore
                 } catch {
                     Write-Log -Message "Could not rescue userdata in old staging $($old.FullName) -- leaving the directory in place." -Level ERROR
                     continue
@@ -6540,6 +7479,21 @@ function Invoke-Workflow {
 
             Set-Progress -Phase 'Complete' -Detail 'Done' -Percent 100
             Write-Step -Message 'Workflow completed successfully.' -Type OK
+        }
+
+        # Reconcile the update block: a fresh Spotify placement (web installer or version
+        # swap) restores pristine program files, which silently drops the endpoint patch.
+        # A "blocked" state must always mean the endpoint is actually patched.
+        try {
+            $postBlock = Get-SpotifyUpdateBlockState
+            if ($postBlock.Blocked -and -not $postBlock.EndpointPatched -and
+                (Test-Path -LiteralPath $Script:Config.SpotifyExePath)) {
+                Write-Step -Message 'Re-applying the update block to the new Spotify files...' -Type INFO
+                Set-SpotifyUpdateBlock -Force | Out-Null
+            }
+        } catch {
+            $Script:UpdateBlockReapplyFailed = $true
+            Write-Step -Message "  Could not re-apply the update block after the workflow: $($_.Exception.Message)" -Type WARN
         }
     } catch {
 
@@ -7607,12 +8561,24 @@ function Invoke-Diagnostics {
             Write-Host ('  Catalog unavailable:       ' + $_.Exception.Message) -ForegroundColor Red
         }
         $diagBlock = Get-SpotifyUpdateBlockState
-        Write-Host ('  Update block:              ' + $(if ($diagBlock.Blocked) { 'ACTIVE (deny ACL)' } else { 'not active' }))
+        $diagEndpoint = if ($diagBlock.EndpointPatched) {
+            'ACTIVE (' + @($diagBlock.EndpointPatchFiles).Count + ' file(s))'
+        } elseif ($diagBlock.EndpointProbeFailed) {
+            'PROBE FAILED (see log)'
+        } elseif ($diagBlock.EndpointNeedleMissing) {
+            'not applicable (pattern absent in program files)'
+        } else {
+            'not applied'
+        }
+        Write-Host ('  Update block:              ' + $(if ($diagBlock.Blocked) { 'ACTIVE' } else { 'not active' }))
+        Write-Host ('  Endpoint patch:            ' + $diagEndpoint)
+        Write-Host ('  Launcher update flag:      ' + $(if (@($diagBlock.LauncherFlagTargets).Count -gt 0) { 'ACTIVE (' + @($diagBlock.LauncherFlagTargets).Count + ' launcher(s))' } else { 'not applied' }))
+        Write-Host ('  Smart App Control:         ' + $(if (Test-SmartAppControlEnabled) { 'ON -- the binary endpoint patch is skipped on this PC' } else { 'off' }))
         Write-Host ('  Update dir deny ACL:       ' + $diagBlock.DenyOnUpdateDir)
         Write-Host ('  Roaming Update deny ACL:   ' + $diagBlock.DenyOnRoamingUpdateDir)
         Write-Host ('  Install dir:               ' + $diagBlock.InstallDir)
         Write-Host ('  Install Update deny ACL:   ' + $diagBlock.DenyOnInstallUpdateDir)
-        Write-Host ('  Guard files:               ' + @($diagBlock.GuardedFiles).Count)
+        Write-Host ('  Leftover guard files:      ' + @($diagBlock.GuardedFiles).Count + ' (legacy remnants -- run -UnblockUpdates to sweep them)')
         if (@($diagBlock.PendingUpdateFiles).Count -gt 0) {
             Write-Host ('  PENDING staged update:     ' + @($diagBlock.PendingUpdateFiles).Count + ' file(s) -- will apply on next launch') -ForegroundColor Yellow
         }
@@ -7621,6 +8587,11 @@ function Invoke-Diagnostics {
         if ($diagRescue.Count -gt 0) {
             Write-Host '  USERDATA RESCUE DIRS (recover manually):' -ForegroundColor Yellow
             foreach ($rd in $diagRescue) { Write-Host ('    ' + $rd.FullName) -ForegroundColor Yellow }
+        }
+        $diagBrowserRescue = @(Get-ChildItem -LiteralPath $Script:AppStateDir -Directory -Filter 'BrowserProfileRescue_*' -ErrorAction SilentlyContinue)
+        if ($diagBrowserRescue.Count -gt 0) {
+            Write-Host '  BROWSER PROFILE RESCUE DIRS (Marketplace data -- recover manually):' -ForegroundColor Yellow
+            foreach ($bd in $diagBrowserRescue) { Write-Host ('    ' + $bd.FullName) -ForegroundColor Yellow }
         }
     } catch {
         Write-Host ('  Version management probe failed: ' + $_.Exception.Message) -ForegroundColor Red
@@ -7850,6 +8821,11 @@ function Invoke-FinalCleanup {
         $rescueFailed = $false
         try {
             $null = Save-StagedUserdata -StagingPath $Script:StagingPath
+        } catch {
+            $rescueFailed = $true
+        }
+        try {
+            $null = Save-StagedBrowserProfile -StagingPath $Script:StagingPath
         } catch {
             $rescueFailed = $true
         }
